@@ -1,4 +1,16 @@
 streamlit
 pandas
+numpy
+scikit-learn
+matplotlib
+seaborn
+Pillow
 python-docx
 pymupdf
+lime
+transformers
+torch
+smtplib
+docx2txt
+PyPDF2
+tensorflow

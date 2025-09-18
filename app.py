@@ -110,13 +110,13 @@ class DLPSystem:
     def __init__(self):
         # Sensitive data patterns (regex)
         self.patterns = {
-            'SSN': r'\b\d{3}-\d{2}-\d{4}\b',
+            'SSN': r'(\d{3}-\d{2}-\d{4})',
             'Credit Card': r'\b(?:\d{4}[- ]?){3}\d{4}\b',
             'Phone': r'\b\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b',
             'Email': r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
             'API Key': r'\b[A-Za-z0-9]{32}\b',
             'AWS Key': r'\bAKIA[0-9A-Z]{16}\b',
-            'Password': r'\b(password|passwd|pwd)[:=]\s*[\w@#$%^&*]+\b'
+            'Password': r'\b(?:password|passwd|pwd)[:=]\s*([\w@#$%^&*]+)'
         }
         self.zero_shot = False
         self.zero_shot_classifier = None
@@ -359,16 +359,14 @@ class DLPSystem:
             "user": st.session_state.pending_user
         }
         dlp_data["scans"].append(scan_record)
-              
-         # Update risk distribution
-        dlp_data["risk_distribution"][risk_level] = dlp_data["risk_distribution"].get(risk_level, 0) + 1
+        
+        # Update risk distribution
+        dlp_data["risk_distribution"][risk_level] += 1
         
         # Update detection statistics
-        for pattern, matches in patterns_found.items():
+        for pattern in patterns_found:
             if pattern in dlp_data["detection_stats"]:
-                dlp_data["detection_stats"][pattern] = dlp_data["detection_stats"].get(pattern, 0) + len(matches)
-            else:
-                dlp_data["detection_stats"][pattern] = len(matches)
+                dlp_data["detection_stats"][pattern] += len(patterns_found[pattern])
         
         # If action was block or quarantine, log as violation
         if action_taken in ["Block transmission", "Quarantine file"]:
@@ -386,8 +384,7 @@ class DLPSystem:
                 dlp_data["blocked_attempts"].append(violation_record)
         
         save_dlp_data(dlp_data)
-        return True
-      
+    
     def log_email_scan(self, recipient, subject, risk_level, patterns_found, action_taken):
         """Log email scan results to the data store"""
         dlp_data = load_dlp_data()
@@ -538,72 +535,58 @@ else:
     # ------------------------------
     # MAIN APP (user authenticated)
     # ------------------------------
-    # Main application functionality for authenticated users
-    menu = st.sidebar.selectbox("Menu", ["Dashboard", "File Scanner", "Email Protection", "Policy Management", "Reports & Analytics", "Audit Logs"])
+    menu = st.sidebar.selectbox("Menu", ["Dashboard", "File Scanner", "Email Protection", "Policy Management", "Reports & Analytics"])
+
     if menu == "Dashboard":
         st.markdown('<p class="sub-header">System Dashboard</p>', unsafe_allow_html=True)
-        
-        # Load real data
         dlp_data = load_dlp_data()
-        
         # Calculate metrics
         total_scans = len(dlp_data["scans"])
-        today_scans = len([scan for scan in dlp_data["scans"] 
-                          if datetime.fromisoformat(scan["timestamp"]).date() == datetime.now().date()])
-        
+        today = datetime.now().date()
+        today_scans = sum(datetime.fromisoformat(scan["timestamp"]).date() == today for scan in dlp_data["scans"])
         total_violations = len(dlp_data["violations"])
-        today_violations = len([v for v in dlp_data["violations"] 
-                               if datetime.fromisoformat(v["timestamp"]).date() == datetime.now().date()])
-        
+        today_violations = sum(datetime.fromisoformat(v["timestamp"]).date() == today for v in dlp_data["violations"])
         total_blocked = len(dlp_data["blocked_attempts"])
-        today_blocked = len([b for b in dlp_data["blocked_attempts"] 
-                            if datetime.fromisoformat(b["timestamp"]).date() == datetime.now().date()])
-        
-        # Metrics
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.metric("Files Scanned", total_scans, f"{today_scans} today")
-            st.markdown('</div>', unsafe_allow_html=True)
-        with col2:
-            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.metric("Policy Violations", total_violations, f"{today_violations} today")
-            st.markdown('</div>', unsafe_allow_html=True)
-        with col3:
-            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.metric("Blocked Attempts", total_blocked, f"{today_blocked} today")
-            st.markdown('</div>', unsafe_allow_html=True)
-        with col4:
-            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            system_health = 100 - (min(total_violations / max(total_scans, 1) * 100, 100) if total_scans > 0 else 0)
-            st.metric("System Health", f"{system_health:.0f}%", f"{100 - system_health:.0f}% issues")
-            st.markdown('</div>', unsafe_allow_html=True)
-        
-        # Recent alerts
-        st.markdown("### Recent Alerts")
-        if dlp_data["violations"]:
-            recent_violations = sorted(dlp_data["violations"], 
-                                      key=lambda x: x["timestamp"], reverse=True)[:5]
+        today_blocked = sum(datetime.fromisoformat(b["timestamp"]).date() == today for b in dlp_data["blocked_attempts"])
+        # Use both file and email violations for audit log
+        all_violations = list(dlp_data["violations"])
+        for e in dlp_data.get("email_scans", []):
+            if e.get("action_taken") == "Blocked":
+                all_violations.append({
+                    "timestamp": e["timestamp"],
+                    "risk_level": e.get("risk_level", "Unknown"),
+                    "patterns_found": e.get("patterns_found", {}),
+                    "action_taken": e.get("action_taken", "Unknown"),
+                    "user": e.get("sender", "Unknown")
+                })
+        if all_violations:
+            recent_violations = sorted(all_violations, key=lambda x: x["timestamp"], reverse=True)[:5]
             alert_data = pd.DataFrame([{
                 'Time': datetime.fromisoformat(v["timestamp"]).strftime('%Y-%m-%d %H:%M'),
                 'Severity': v["risk_level"],
-                'Type': ', '.join(list(v["patterns_found"].keys())[:2]) + ('...' if len(v["patterns_found"]) > 2 else ''),
+                'Type': ', '.join([k for k, v2 in v["patterns_found"].items() if v2][:2]) + ('...' if len([k for k, v2 in v["patterns_found"].items() if v2]) > 2 else ''),
                 'Action': v["action_taken"],
                 'User': v.get("user", "Unknown")
             } for v in recent_violations])
             st.dataframe(alert_data, use_container_width=True)
         else:
             st.info("No violations detected yet.")
-        
         # Risk distribution chart
         st.markdown("### Risk Distribution")
+        risk_levels = {"High": 0, "Medium": 0, "Low": 0}
+        for scan in dlp_data["scans"]:
+            rl = scan.get("risk_level", "Low")
+            if rl in risk_levels:
+                risk_levels[rl] += 1
+        for email in dlp_data.get("email_scans", []):
+            rl = email.get("risk_level", "Low")
+            if rl in risk_levels:
+                risk_levels[rl] += 1
         risk_data = pd.DataFrame({
-            'Risk Level': list(dlp_data["risk_distribution"].keys()),
-            'Count': list(dlp_data["risk_distribution"].values())
+            'Risk Level': list(risk_levels.keys()),
+            'Count': list(risk_levels.values())
         })
-        # Replace NaN and ensure all values are integers
         risk_data['Count'] = risk_data['Count'].fillna(0).astype(int)
-        # Only plot if there is at least one nonzero value
         if risk_data['Count'].sum() > 0:
             fig, ax = plt.subplots()
             ax.pie(risk_data['Count'], labels=risk_data['Risk Level'], autopct='%1.1f%%')
@@ -628,7 +611,6 @@ else:
             with st.spinner("Scanning file for sensitive data..."):
                 text = dlp_system.extract_text_from_file(uploaded_file)
                 results = dlp_system.check_sensitive_data(text)
-        
                 if results['sensitive'] or results['ml_score'] > 0.4:
                     st.markdown('<div class="alert-box">', unsafe_allow_html=True)
                     st.error("⚠ Sensitive content detected!")
@@ -641,15 +623,6 @@ else:
                     # Automatic Policy Decision
                     decision = policy_engine.evaluate(results['patterns_found'], results['risk_level'])
                     st.warning(f"Policy Decision: *{decision}*")
-                    dlp_system.log_scan_result(
-                        uploaded_file.name, 
-                        uploaded_file.type, 
-                        f"{uploaded_file.size / 1024:.2f} KB",
-                        results['risk_level'],
-                        results['patterns_found'],
-                        decision
-                    )
-                    
                     if st.button("Apply Action"):
                         st.success(f"Action applied: {decision}")
                         st.info(f"Incident logged at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -659,7 +632,6 @@ else:
                     st.success("✅ No sensitive content detected")
                     st.write(f"Confidence: {results['ml_score']:.2%}")
                     st.write(f"Risk Level: {results['risk_level']}")
-                    # Log the scan with "No action needed"
                     dlp_system.log_scan_result(
                         uploaded_file.name, 
                         uploaded_file.type, 
@@ -668,140 +640,11 @@ else:
                         results['patterns_found'],
                         "No action needed"
                     )
-                    
                     st.markdown('</div>', unsafe_allow_html=True)
                 if text:
                     with st.expander("View extracted text"):
                         st.text(text[:500] + "..." if len(text) > 500 else text)
-    elif menu == "Audit Logs":
-        st.markdown('<p class="sub-header">Audit Logs</p>', unsafe_allow_html=True)
-        
-        # Load audit data
-        dlp_data = load_dlp_data()
-        
-        # Filter options
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            log_type = st.selectbox("Log Type", ["All", "Scans", "Violations", "Blocked Attempts", "Email Scans"])
-        with col2:
-            risk_filter = st.selectbox("Risk Level", ["All", "High", "Medium", "Low"])
-        with col3:
-            date_filter = st.selectbox("Time Range", ["Last 24 hours", "Last 7 days", "Last 30 days", "All time"])
-        
-        # Determine cutoff date based on filter
-        now = datetime.now()
-        if date_filter == "Last 24 hours":
-            cutoff_date = now - timedelta(hours=24)
-        elif date_filter == "Last 7 days":
-            cutoff_date = now - timedelta(days=7)
-        elif date_filter == "Last 30 days":
-            cutoff_date = now - timedelta(days=30)
-        else:
-            cutoff_date = datetime.min  # All time
-        
-        # Filter logs based on selections
-        filtered_logs = []
-        
-        if log_type in ["All", "Scans"]:
-            for scan in dlp_data["scans"]:
-                scan_time = datetime.fromisoformat(scan["timestamp"])
-                if (scan_time >= cutoff_date and 
-                    (risk_filter == "All" or scan["risk_level"] == risk_filter)):
-                    scan["log_type"] = "Scan"
-                    filtered_logs.append(scan)
-        
-        if log_type in ["All", "Violations"]:
-            for violation in dlp_data["violations"]:
-                violation_time = datetime.fromisoformat(violation["timestamp"])
-                if (violation_time >= cutoff_date and 
-                    (risk_filter == "All" or violation["risk_level"] == risk_filter)):
-                    violation["log_type"] = "Violation"
-                    filtered_logs.append(violation)
-        
-        if log_type in ["All", "Blocked Attempts"]:
-            for blocked in dlp_data["blocked_attempts"]:
-                blocked_time = datetime.fromisoformat(blocked["timestamp"])
-                if (blocked_time >= cutoff_date and 
-                    (risk_filter == "All" or blocked["risk_level"] == risk_filter)):
-                    blocked["log_type"] = "Blocked Attempt"
-                    filtered_logs.append(blocked)
-        
-        if log_type in ["All", "Email Scans"]:
-            for email in dlp_data["email_scans"]:
-                email_time = datetime.fromisoformat(email["timestamp"])
-                if (email_time >= cutoff_date and 
-                    (risk_filter == "All" or email["risk_level"] == risk_filter)):
-                    email["log_type"] = "Email Scan"
-                    filtered_logs.append(email)
-        
-        # Sort logs by timestamp (newest first)
-        filtered_logs.sort(key=lambda x: x["timestamp"], reverse=True)
-        
-        # Display logs
-        st.subheader(f"Audit Logs ({len(filtered_logs)} entries)")
-        
-        if filtered_logs:
-            # Convert to DataFrame for display
-            log_data = []
-            for log in filtered_logs:
-                log_time = datetime.fromisoformat(log["timestamp"]).strftime('%Y-%m-%d %H:%M:%S')
-                patterns = ", ".join([f"{k}:{len(v)}" for k, v in log.get("patterns_found", {}).items() if v])
-                log_entry = {
-                    "Timestamp": log_time,
-                    "Type": log.get("log_type", "Unknown"),
-                    "Risk": log.get("risk_level", "Unknown"),
-                    "Filename": log.get("filename", "N/A"),
-                    "Patterns": patterns or "None",
-                    "Action": log.get("action_taken", "N/A"),
-                    "User": log.get("user", "Unknown")
-                }
-                
-                # Handle email scans differently
-                if log.get("log_type") == "Email Scan":
-                    log_entry["Filename"] = f"Email to: {log.get('recipient', 'Unknown')}"
-                
-                log_data.append(log_entry)
-            
-            log_df = pd.DataFrame(log_data)
-            st.dataframe(log_df, use_container_width=True, height=400)
-            
-            # Download option
-            csv = log_df.to_csv(index=False)
-            st.download_button(
-                label="Download Audit Logs as CSV",
-                data=csv,
-                file_name=f"audit_logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime="text/csv"
-            )
-        else:
-            st.info("No audit logs match the selected filters.")
-        
-        # Statistics section
-        st.subheader("Audit Statistics")
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            st.metric("Total Scans", len(dlp_data["scans"]))
-        with col2:
-            st.metric("Total Violations", len(dlp_data["violations"]))
-        with col3:
-            st.metric("Blocked Attempts", len(dlp_data["blocked_attempts"]))
-        
-        # Pattern detection statistics
-        st.subheader("Pattern Detection Counts")
-        pattern_counts = [(pattern, count) for pattern, count in dlp_data["detection_stats"].items() if count > 0]
-        pattern_counts.sort(key=lambda x: x[1], reverse=True)
-        
-        if pattern_counts:
-            patterns, counts = zip(*pattern_counts)
-            fig, ax = plt.subplots(figsize=(10, 6))
-            ax.bar(patterns, counts)
-            ax.set_title('Sensitive Pattern Detections')
-            ax.set_ylabel('Count')
-            plt.xticks(rotation=45)
-            st.pyplot(fig)
-        else:
-            st.info("No pattern detection data available yet.")
+    
     elif menu == "Email Protection":
         st.markdown('<p class="sub-header">Email Content Protection</p>', unsafe_allow_html=True)
         col1, col2 = st.columns(2)
@@ -929,36 +772,41 @@ else:
     
     elif menu == "Reports & Analytics":
         st.markdown('<p class="sub-header">Reports & Analytics</p>', unsafe_allow_html=True)
-        
-        # Load real data
+        # Always reload real-time data
         dlp_data = load_dlp_data()
-        
+        # Metrics
+        total_scans = len(dlp_data["scans"]) + len(dlp_data.get("email_scans", []))
+        total_violations = len(dlp_data["violations"]) + sum(1 for e in dlp_data.get("email_scans", []) if e.get("action_taken") == "Blocked")
+        total_blocked = len(dlp_data["blocked_attempts"]) + sum(1 for e in dlp_data.get("email_scans", []) if e.get("action_taken") == "Blocked")
+        st.metric("Total Scans", total_scans)
+        st.metric("Total Violations", total_violations)
+        st.metric("Total Blocked", total_blocked)
+        # Detection Statistics by Month
+        detection_by_month = {}
+        for scan in dlp_data["scans"]:
+            month = datetime.fromisoformat(scan["timestamp"]).strftime('%b')
+            if month not in detection_by_month:
+                detection_by_month[month] = {pattern: 0 for pattern in dlp_system.patterns.keys()}
+            for pattern in scan["patterns_found"]:
+                detection_by_month[month][pattern] += len(scan["patterns_found"][pattern])
+        # Include email scans
+        for email in dlp_data.get("email_scans", []):
+            month = datetime.fromisoformat(email["timestamp"]).strftime('%b')
+            if month not in detection_by_month:
+                detection_by_month[month] = {pattern: 0 for pattern in dlp_system.patterns.keys()}
+            for pattern in email["patterns_found"]:
+                detection_by_month[month][pattern] += len(email["patterns_found"][pattern])
+        # Chart
         col1, col2 = st.columns(2)
         with col1:
             st.subheader("Detection Statistics")
-            
-            # Get detection data by month
-            detection_by_month = {}
-            for scan in dlp_data["scans"]:
-                month = datetime.fromisoformat(scan["timestamp"]).strftime('%b')
-                if month not in detection_by_month:
-                    detection_by_month[month] = {pattern: 0 for pattern in dlp_system.patterns.keys()}
-                
-                for pattern in scan["patterns_found"]:
-                    if pattern in detection_by_month[month]:
-                        detection_by_month[month][pattern] += len(scan["patterns_found"][pattern])
-            
-            # Convert to DataFrame for visualization
             if detection_by_month:
                 months = list(detection_by_month.keys())
                 detection_data = pd.DataFrame({
                     'Month': months,
-                    'SSN': [detection_by_month[m].get('SSN', 0) for m in months],
-                    'Credit Card': [detection_by_month[m].get('Credit Card', 0) for m in months],
-                    'API Key': [detection_by_month[m].get('API Key', 0) for m in months]
+                    **{pattern: [detection_by_month[m].get(pattern, 0) for m in months] for pattern in dlp_system.patterns.keys()}
                 })
-                
-                fig, ax = plt.subplots(figsize=(10, 6))
+                fig, ax = plt.subplots(figsize=(8, 5))
                 detection_data.set_index('Month').plot(kind='bar', ax=ax)
                 ax.set_title('Sensitive Data Detections by Type')
                 ax.set_ylabel('Count')
@@ -966,33 +814,32 @@ else:
                 st.pyplot(fig)
             else:
                 st.info("No detection data available yet.")
-        
+        # Risk Trend by Week
         with col2:
             st.subheader("Risk Trend")
-            
-            # Get risk data by week
             risk_by_week = {}
             for scan in dlp_data["scans"]:
                 week_num = datetime.fromisoformat(scan["timestamp"]).isocalendar()[1]
                 if week_num not in risk_by_week:
-                    risk_by_week[week_num] = {"High Risk": 0, "Medium Risk": 0, "Low Risk": 0}
-                
-                risk_by_week[week_num][f"{scan['risk_level']} Risk"] += 1
-            
-            # Convert to DataFrame for visualization
+                    risk_by_week[week_num] = {"High": 0, "Medium": 0, "Low": 0}
+                risk_by_week[week_num][scan["risk_level"]] += 1
+            for email in dlp_data.get("email_scans", []):
+                week_num = datetime.fromisoformat(email["timestamp"]).isocalendar()[1]
+                if week_num not in risk_by_week:
+                    risk_by_week[week_num] = {"High": 0, "Medium": 0, "Low": 0}
+                risk_by_week[week_num][email["risk_level"]] += 1
             if risk_by_week:
                 weeks = sorted(risk_by_week.keys())
                 risk_data = pd.DataFrame({
                     'Week': weeks,
-                    'High Risk': [risk_by_week[w].get('High Risk', 0) for w in weeks],
-                    'Medium Risk': [risk_by_week[w].get('Medium Risk', 0) for w in weeks],
-                    'Low Risk': [risk_by_week[w].get('Low Risk', 0) for w in weeks]
+                    'High': [risk_by_week[w]['High'] for w in weeks],
+                    'Medium': [risk_by_week[w]['Medium'] for w in weeks],
+                    'Low': [risk_by_week[w]['Low'] for w in weeks]
                 })
-                
-                fig, ax = plt.subplots(figsize=(10, 6))
-                ax.plot(risk_data['Week'], risk_data['High Risk'], marker='o', label='High Risk', linewidth=2)
-                ax.plot(risk_data['Week'], risk_data['Medium Risk'], marker='s', label='Medium Risk', linewidth=2)
-                ax.plot(risk_data['Week'], risk_data['Low Risk'], marker='^', label='Low Risk', linewidth=2)
+                fig, ax = plt.subplots(figsize=(8, 5))
+                ax.plot(risk_data['Week'], risk_data['High'], marker='o', label='High', linewidth=2)
+                ax.plot(risk_data['Week'], risk_data['Medium'], marker='s', label='Medium', linewidth=2)
+                ax.plot(risk_data['Week'], risk_data['Low'], marker='^', label='Low', linewidth=2)
                 ax.set_title('Risk Level Trend Over Time')
                 ax.set_xlabel('Week')
                 ax.set_ylabel('Count')
@@ -1001,17 +848,39 @@ else:
                 st.pyplot(fig)
             else:
                 st.info("No risk data available yet.")
-        
+        # Recent Audit Log Table
+        st.subheader("Recent Audit Log")
+        all_violations = list(dlp_data["violations"])
+        for e in dlp_data.get("email_scans", []):
+            if e.get("action_taken") == "Blocked":
+                all_violations.append({
+                    "timestamp": e["timestamp"],
+                    "risk_level": e.get("risk_level", "Unknown"),
+                    "patterns_found": e.get("patterns_found", {}),
+                    "action_taken": e.get("action_taken", "Unknown"),
+                    "user": e.get("sender", "Unknown"),
+                    "type": "Email"
+                })
+        if all_violations:
+            recent_violations = sorted(all_violations, key=lambda x: x["timestamp"], reverse=True)[:10]
+            audit_data = pd.DataFrame([{
+                'Time': datetime.fromisoformat(v["timestamp"]).strftime('%Y-%m-%d %H:%M'),
+                'Severity': v["risk_level"],
+                'Type': ', '.join([k for k, v2 in v["patterns_found"].items() if v2][:2]) + ('...' if len([k for k, v2 in v["patterns_found"].items() if v2]) > 2 else ''),
+                'Action': v["action_taken"],
+                'User': v.get("user", "Unknown"),
+                'Channel': v.get("type", "File")
+            } for v in recent_violations])
+            st.dataframe(audit_data, use_container_width=True)
+        else:
+            st.info("No audit log entries yet.")
+        # Custom Report
         st.subheader("Generate Custom Report")
         report_range = st.selectbox("Time Range", ["Last 7 days", "Last 30 days", "Last quarter", "Last year"])
         report_type = st.multiselect("Data Types", list(dlp_system.patterns.keys()), default=list(dlp_system.patterns.keys())[:3])
-        
         if st.button("Generate Report"):
             with st.spinner("Generating report..."):
-                # Create a summary report based on real data
                 dlp_data = load_dlp_data()
-                
-                # Filter data based on time range
                 now = datetime.now()
                 if report_range == "Last 7 days":
                     cutoff_date = now - timedelta(days=7)
@@ -1019,40 +888,35 @@ else:
                     cutoff_date = now - timedelta(days=30)
                 elif report_range == "Last quarter":
                     cutoff_date = now - timedelta(days=90)
-                else:  # Last year
+                else:
                     cutoff_date = now - timedelta(days=365)
-                
-                filtered_scans = [scan for scan in dlp_data["scans"] 
-                                 if datetime.fromisoformat(scan["timestamp"]) >= cutoff_date]
-                filtered_violations = [v for v in dlp_data["violations"] 
-                                      if datetime.fromisoformat(v["timestamp"]) >= cutoff_date]
-                
+                filtered_scans = [scan for scan in dlp_data["scans"] if datetime.fromisoformat(scan["timestamp"]) >= cutoff_date]
+                filtered_emails = [e for e in dlp_data.get("email_scans", []) if datetime.fromisoformat(e["timestamp"]) >= cutoff_date]
+                filtered_violations = [v for v in dlp_data["violations"] if datetime.fromisoformat(v["timestamp"]) >= cutoff_date]
+                filtered_email_violations = [e for e in filtered_emails if e.get("action_taken") == "Blocked"]
                 # Create report content
                 report_content = f"SecureDLP Report - {report_range}\n"
                 report_content += f"Generated on: {now.strftime('%Y-%m-%d %H:%M:%S')}\n"
-                report_content += f"Total scans: {len(filtered_scans)}\n"
-                report_content += f"Total violations: {len(filtered_violations)}\n"
+                report_content += f"Total scans: {len(filtered_scans) + len(filtered_emails)}\n"
+                report_content += f"Total violations: {len(filtered_violations) + len(filtered_email_violations)}\n"
                 report_content += f"Data types included: {', '.join(report_type)}\n\n"
-                
                 # Add detection statistics
                 report_content += "Detection Statistics:\n"
                 for pattern in report_type:
                     count = sum(len(scan["patterns_found"].get(pattern, [])) for scan in filtered_scans)
+                    count += sum(len(email["patterns_found"].get(pattern, [])) for email in filtered_emails)
                     report_content += f"- {pattern}: {count} detections\n"
-                
                 # Add risk distribution
                 risk_dist = {"High": 0, "Medium": 0, "Low": 0}
                 for scan in filtered_scans:
                     risk_dist[scan["risk_level"]] += 1
-                
+                for email in filtered_emails:
+                    risk_dist[email["risk_level"]] += 1
                 report_content += f"\nRisk Distribution:\n"
                 for level, count in risk_dist.items():
-                    report_content += f"- {level}: {count} files\n"
-                
+                    report_content += f"- {level}: {count} files/emails\n"
                 time.sleep(2)
                 st.success("Report generated successfully!")
-                
-                # Create a downloadable text file
                 st.download_button(
                     label="Download Report",
                     data=report_content,
