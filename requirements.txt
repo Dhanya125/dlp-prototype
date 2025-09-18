@@ -6,10 +6,9 @@ matplotlib
 seaborn
 pillow
 python-docx
-pymupdf
+pymupdf==1.26.4
 lime
-transformers
-torch
+transformers==4.56.1
+torch==2.8.0
 docx2txt
 PyPDF2
-tensorflow==2.12.0
