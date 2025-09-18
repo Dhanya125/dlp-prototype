@@ -4,13 +4,11 @@ numpy
 scikit-learn
 matplotlib
 seaborn
-Pillow
+pillow
 python-docx
 pymupdf
 lime
 transformers
 torch
-smtplib
 docx2txt
 PyPDF2
-tensorflow
